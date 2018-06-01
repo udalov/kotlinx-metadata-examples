@@ -1,0 +1,21 @@
+plugins {
+    id "java"
+    id "org.jetbrains.kotlin.jvm" version "1.2.41"
+}
+
+group "org.udalov"
+version "1.0-SNAPSHOT"
+
+repositories {
+    mavenCentral()
+    maven { url "https://kotlin.bintray.com/kotlinx/" }
+}
+
+dependencies {
+    compile "org.jetbrains.kotlinx:kotlinx-metadata-jvm:0.0.2"
+    compile "org.ow2.asm:asm:6.0"
+    compile "org.ow2.asm:asm-tree:6.0"
+
+    testCompile "junit:junit:4.12"
+    testCompile "org.jetbrains.kotlin:kotlin-stdlib:1.2.41"
+}
