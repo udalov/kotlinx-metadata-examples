@@ -11,7 +11,7 @@ repositories {
 }
 
 dependencies {
-    compile "org.jetbrains.kotlinx:kotlinx-metadata-jvm:0.0.5"
+    compile "org.jetbrains.kotlinx:kotlinx-metadata-jvm:0.1.0"
     compile "org.ow2.asm:asm:7.1"
     compile "org.ow2.asm:asm-tree:7.1"
 

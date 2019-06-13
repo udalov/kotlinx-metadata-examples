@@ -1,7 +1,13 @@
 package examples;
 
-import kotlinx.metadata.*;
-import kotlinx.metadata.jvm.*;
+import kotlinx.metadata.Flag;
+import kotlinx.metadata.KmDeclarationContainer;
+import kotlinx.metadata.KmFunction;
+import kotlinx.metadata.KmProperty;
+import kotlinx.metadata.jvm.JvmExtensionsKt;
+import kotlinx.metadata.jvm.JvmMethodSignature;
+import kotlinx.metadata.jvm.KotlinClassHeader;
+import kotlinx.metadata.jvm.KotlinClassMetadata;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.objectweb.asm.ClassReader;
@@ -44,17 +50,20 @@ public class FindKotlinGeneratedMethods {
 
         // The given .class file could have been either a normal Kotlin class, or a file facade (a .class file
         // generated for top-level functions/properties in one source file).
-        // Since the metadata is represented a bit differently in these cases, we need to handle them separately
-        List<JvmMethodSignature> result;
+        // Extract the declaration container, which will give us direct access to functions/properties in that class file
+        KmDeclarationContainer container;
         if (metadata instanceof KotlinClassMetadata.Class) {
-            result = loadMethodsFromClass((KotlinClassMetadata.Class) metadata);
+            container = ((KotlinClassMetadata.Class) metadata).toKmClass();
         } else if (metadata instanceof KotlinClassMetadata.FileFacade) {
-            result = loadMethodsFromFileFacade((KotlinClassMetadata.FileFacade) metadata);
+            container = ((KotlinClassMetadata.FileFacade) metadata).toKmPackage();
         } else if (metadata instanceof KotlinClassMetadata.MultiFileClassPart) {
-            result = loadMethodsFromMultiFileClassPart((KotlinClassMetadata.MultiFileClassPart) metadata);
+            container = ((KotlinClassMetadata.MultiFileClassPart) metadata).toKmPackage();
         } else {
-            result = Collections.emptyList();
+            return Collections.emptyList();
         }
+
+        // Get all generated JVM methods from the declaration container
+        List<JvmMethodSignature> result = getGeneratedMethods(container);
 
         // Transform each JVM method signature to a simple string, concatenating the name and the method descriptor
         return result.stream().map(JvmMethodSignature::asString).collect(Collectors.toList());
@@ -122,127 +131,47 @@ public class FindKotlinGeneratedMethods {
     }
 
     /**
-     * Visits the metadata of a class and returns the list of JVM method signatures of generated methods there.
-     */
-    @NotNull
-    private static List<JvmMethodSignature> loadMethodsFromClass(KotlinClassMetadata.Class metadata) {
-        List<JvmMethodSignature> result = new ArrayList<>();
-        metadata.accept(new KmClassVisitor() {
-            @Override
-            public KmFunctionVisitor visitFunction(int flags, String name) {
-                return createFunctionVisitor(flags, result);
-            }
-
-            @Override
-            public KmPropertyVisitor visitProperty(int flags, String name, int getterFlags, int setterFlags) {
-                return createPropertyVisitor(getterFlags, setterFlags, result);
-            }
-        });
-        return result;
-    }
-
-    /**
-     * Visits the metadata of a file facade and returns the list of JVM method signatures of generated methods there.
-     */
-    @NotNull
-    private static List<JvmMethodSignature> loadMethodsFromFileFacade(KotlinClassMetadata.FileFacade metadata) {
-        List<JvmMethodSignature> result = new ArrayList<>();
-        metadata.accept(createPackageVisitor(result));
-        return result;
-    }
-
-    /**
-     * Visits the metadata of a multi-file class part (a file facade annotated with @file:JvmMultifileClass)
-     * and returns the list of JVM method signatures of generated methods there.
-     */
-    @NotNull
-    private static List<JvmMethodSignature> loadMethodsFromMultiFileClassPart(KotlinClassMetadata.MultiFileClassPart metadata) {
-        List<JvmMethodSignature> result = new ArrayList<>();
-        metadata.accept(createPackageVisitor(result));
-        return result;
-    }
-
-    /**
-     * Creates a common visitor for {@link #loadMethodsFromFileFacade(KotlinClassMetadata.FileFacade)} and
-     * {@link #loadMethodsFromMultiFileClassPart(KotlinClassMetadata.MultiFileClassPart)}.
-     */
-    @NotNull
-    private static KmPackageVisitor createPackageVisitor(List<JvmMethodSignature> result) {
-        return new KmPackageVisitor() {
-            @Override
-            public KmFunctionVisitor visitFunction(int flags, String name) {
-                return createFunctionVisitor(flags, result);
-            }
-
-            @Override
-            public KmPropertyVisitor visitProperty(int flags, String name, int getterFlags, int setterFlags) {
-                return createPropertyVisitor(getterFlags, setterFlags, result);
-            }
-        };
-    }
-
-    /**
-     * Creates a common function visitor that dumps the JVM signatures of generated methods into the given list.
+     * Returns JVM signatures of generated methods in the given declaration container.
      *
-     * Currently, it handles those methods that are marked as "synthesized" in the Kotlin metadata
-     * (see {@link Flag.Function#IS_SYNTHESIZED}), which include:
+     * A JVM method is considered "generated" here if it's a Kotlin function marked with the "synthesized" flag in the metadata,
+     * or an accessor of a Kotlin property _not_ marked with the "is not default" flag in the metadata.
+     *
+     * Synthesized functions include:
      * <ul>
      *   <li>methods for data classes: componentN, copy, equals, hashCode, toString</li>
      *   <li>values/valueOf methods for enum classes</li>
      *   <li>box/unbox methods for inline classes</li>
      * </ul>
-     */
-    @Nullable
-    private static KmFunctionVisitor createFunctionVisitor(int flags, List<JvmMethodSignature> result) {
-        // Filter out non-synthesized functions
-        if (!Flag.Function.IS_SYNTHESIZED.invoke(flags)) return null;
-
-        return new KmFunctionVisitor() {
-            @Override
-            public KmFunctionExtensionVisitor visitExtensions(KmExtensionType type) {
-                return new JvmFunctionExtensionVisitor() {
-                    @Override
-                    public void visit(JvmMethodSignature desc) {
-                        if (desc != null) {
-                            result.add(desc);
-                        }
-                    }
-                };
-            }
-        };
-    }
-
-    /**
-     * Creates a common property visitor that dumps the JVM signatures of all accessors whose bodies are generated
-     * by the Kotlin compiler automatically into the given list.
      *
-     * For example, in the following Kotlin code:
-     * <pre>
-     *     var name: String
-     *         get() = field
-     * </pre>
-     *
-     * The property `name` has both a getter and a setter, but only the setter body is generated by default by the
-     * Kotlin compiler. Therefore, this method will return the list consisting of a single element
-     * {@code "setName(Ljava/lang/String;)V"}.
+     * The "is not default" flag is set in the metadata if the corresponding property accessor has non-trivial body in the source code.
+     * The property accessor is considered generated if it isn't marked with that flag.
      */
     @NotNull
-    private static KmPropertyVisitor createPropertyVisitor(int getterFlags, int setterFlags, List<JvmMethodSignature> result) {
-        return new KmPropertyVisitor() {
-            @Override
-            public KmPropertyExtensionVisitor visitExtensions(KmExtensionType type) {
-                return new JvmPropertyExtensionVisitor() {
-                    @Override
-                    public void visit(JvmFieldSignature fieldDesc, JvmMethodSignature getterDesc, JvmMethodSignature setterDesc) {
-                        if (getterDesc != null && !Flag.PropertyAccessor.IS_NOT_DEFAULT.invoke(getterFlags)) {
-                            result.add(getterDesc);
-                        }
-                        if (setterDesc != null && !Flag.PropertyAccessor.IS_NOT_DEFAULT.invoke(setterFlags)) {
-                            result.add(setterDesc);
-                        }
-                    }
-                };
+    private static List<JvmMethodSignature> getGeneratedMethods(KmDeclarationContainer container) {
+        List<JvmMethodSignature> result = new ArrayList<>();
+        for (KmFunction function : container.getFunctions()) {
+            if (Flag.Function.IS_SYNTHESIZED.invoke(function.getFlags())) {
+                JvmMethodSignature signature = JvmExtensionsKt.getSignature(function);
+                if (signature != null) {
+                    result.add(signature);
+                }
             }
-        };
+        }
+        for (KmProperty property : container.getProperties()) {
+            if (!Flag.PropertyAccessor.IS_NOT_DEFAULT.invoke(property.getGetterFlags())) {
+                JvmMethodSignature signature = JvmExtensionsKt.getGetterSignature(property);
+                if (signature != null) {
+                    result.add(signature);
+                }
+            }
+            if (!Flag.PropertyAccessor.IS_NOT_DEFAULT.invoke(property.getSetterFlags())) {
+                JvmMethodSignature signature = JvmExtensionsKt.getSetterSignature(property);
+                if (signature != null) {
+                    result.add(signature);
+                }
+            }
+        }
+
+        return result;
     }
 }
